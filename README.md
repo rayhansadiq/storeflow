@@ -1,125 +1,200 @@
 # StoreFlow
 
-**Inventory & Order Management Dashboard for Merchants**
+**Full-stack inventory and order management system for merchants**
 
-StoreFlow is a merchant-facing web application for managing product catalogs, tracking inventory levels, building and placing customer orders, and monitoring revenue in real time. It's built as an original commerce dashboard, not a clone of any existing platform's UI, with a focus on correct business logic, clean component design, and a professional, uncluttered interface.
+StoreFlow is a merchant application for managing a product catalog, tracking inventory, placing customer orders, and monitoring revenue. A React front end talks to a Java and Spring Boot REST API backed by PostgreSQL, with all business rules enforced server-side inside database transactions.
 
 ## Overview
 
-Small merchants need a fast way to see what they're selling, what's running low, and what orders have come in, without wading through a heavyweight platform. StoreFlow is a lightweight, single-page dashboard that covers the core loop of running a store: manage products, take orders, watch inventory drop in real time, and see revenue update immediately.
+Small merchants need one view of what is in stock, what is running low, and what has sold, plus a way to take orders that cannot accidentally sell inventory they do not have. StoreFlow covers that loop: manage products, build an order, and watch stock and revenue update as orders are placed.
 
 ## Problem
 
-Merchants managing inventory manually (spreadsheets, notebooks, memory) run into the same recurring issues:
+Two categories of problem drove this design.
 
-- No single view of what's in stock, what's low, and what's sold out
-- No safeguard preventing an order from being placed for more units than actually exist
-- No easy way to see how a sale affects stock and revenue at the same time
-- Tax calculations done by hand, invite arithmetic errors
+**Operational:** merchants tracking inventory by hand have no single view of stock levels, no safeguard against promising units they do not have, and no automatic link between a sale and the resulting inventory change.
+
+**Technical:** the original version of StoreFlow ran entirely in the browser with state in `localStorage`. That meant business rules like "you cannot order more than is in stock" lived in client-side JavaScript, where they could be bypassed with the browser console; prices and tax were calculated by the client and trusted; and every browser held its own private copy of the data, so nothing was shared and two people could never be looking at the same inventory.
 
 ## Solution
 
-StoreFlow centralizes products, inventory, and orders into one dashboard. Placing an order automatically validates against live stock, calculates subtotal/tax/total, deducts the purchased quantity from inventory, and updates revenue, all instantly, all in the browser.
+The rules and the data moved to the server.
+
+A Spring Boot API owns validation, pricing, tax, and stock. The browser sends only product ids and quantities; the server looks up prices, rejects impossible orders, applies Ontario HST, decrements stock, and writes the order. Every one of those steps happens inside a single database transaction, so an order either fully succeeds or leaves nothing behind. Optimistic locking on the product row means two customers racing for the last unit cannot both win.
+
+The React front end is now purely a presentation layer, with loading states, error handling, and server-supplied error messages.
 
 ## Features
 
-- **Dashboard**: five live stat cards showing Total Products, Inventory Units, Low Stock count, Orders placed, and Revenue, all derived from current app state
-- **Product management**: add, edit, and delete products with full field validation
-- **Search & filters**: live search by name or category, plus status filters (All / In Stock / Low Stock / Out of Stock) and an optional category filter
-- **Automatic inventory status**: every product is classified as In Stock, Low Stock, or Out of Stock based on its quantity
-- **Order builder**: select a product and quantity, add it to a running cart, and review before placing
-- **Order validation**: a customer can never order more units than are currently in stock; the app blocks the attempt and explains exactly how many units are available
-- **Tax-aware order calculations**: subtotal, Ontario HST (13%), and total are computed with reusable, testable functions
-- **Inventory auto-deduction**: placing an order immediately subtracts purchased quantities from stock and reflects the new status everywhere
-- **Order history**: the five most recent orders are shown with date, items, and total
-- **Persistent state**: products and orders are saved to `localStorage`, so the app survives a page refresh; corrupted or missing storage falls back safely to starter data
-- **Reset Demo Data**: a one-click, confirmation-gated reset back to the original starter catalog, useful for repeated demos
+- **Dashboard**: live totals for products, inventory units, low stock count, orders placed, and revenue
+- **Product management**: create, edit, and delete products, persisted to PostgreSQL
+- **Search and filters**: live search by name or category, plus stock status and category filters
+- **Automatic inventory status**: products classify as In Stock, Low Stock, or Out of Stock from their current quantity
+- **Order builder**: select products and quantities, review a running cart, then place the order
+- **Server-side order validation**: an order for more units than exist is rejected with a clear message naming the quantity actually available
+- **Tax calculation**: subtotal, Ontario HST at 13 percent, and total, computed with `BigDecimal` and half-up rounding
+- **Atomic stock decrement**: placing an order and reducing stock happen in one transaction, so a partially applied order is impossible
+- **Concurrency safety**: optimistic locking rejects the losing request when two orders contend for the same stock, returning HTTP 409
+- **Order history**: every order stored with its line items and the unit price captured at purchase time
 
 ## Technologies
 
-- React 19 (function components, hooks)
+**Backend**
+- Java 17
+- Spring Boot 4.1 (Spring Web MVC, Spring Data JPA, Bean Validation)
+- Hibernate 7 as the JPA provider
+- PostgreSQL 18
+- Maven (via the Maven Wrapper)
+- JUnit 5, AssertJ, Spring Boot Test
+
+**Frontend**
+- React 19 (function components and hooks)
 - Vite
 - JavaScript (ES2022+)
-- Plain CSS (custom properties, flexbox, CSS grid)
-- Browser `localStorage`
-- Git / GitHub
-
-No backend, database, authentication, or external APIs. All state lives in the browser by design, keeping the project focused and easy to reason about end to end.
+- Plain CSS with custom properties
 
 ## Architecture
 
 ```
-src/
-  components/
-    Sidebar.jsx          navigation between Dashboard / Products / Orders
-    DashboardStats.jsx   derives and renders the five stat cards
-    ProductTable.jsx     renders a product list with optional edit/delete actions
-    ProductForm.jsx      add/edit form with inline validation
-    SearchBar.jsx        controlled search input
-    InventoryBadge.jsx   renders a status pill (In Stock / Low Stock / Out of Stock)
-    Modal.jsx            reusable dialog (Escape to close, click-outside to close)
-    OrderBuilder.jsx      product/quantity picker + running cart
-    OrderSummary.jsx      subtotal / tax / total + Place Order action
-    OrderHistory.jsx      most recent orders
-  utils/
-    inventory.js          getInventoryStatus(), filterProducts()
-    calculations.js        calculateSubtotal(), calculateTax(), calculateTotal(), formatCurrency()
-    validation.js          validateProduct(), validateOrderQuantity()
-    storage.js              load/save products & orders to localStorage, with fallback
-  data/
-    starterProducts.js    seed catalog used on first load and on reset
-  App.jsx                 owns all application state, wires components together
-  App.css                  all component styling
+storeflow/
+  backend/
+    src/main/java/com/storeflow/backend/
+      controller/     HTTP mapping only, no business logic
+      service/        business rules and transaction boundaries
+      repository/     Spring Data JPA database access
+      model/          JPA entities mapped to tables
+      dto/            request and response shapes, decoupled from entities
+      exception/      domain exceptions and the HTTP translation layer
+      config/         CORS configuration and demo data seeding
+    src/test/java/    JUnit 5 tests against a dedicated test database
+  frontend/
+    src/
+      api/            fetch wrappers and field mapping
+      components/     presentation components
+      utils/          display formatting and client-side form feedback
 ```
 
-State lives in `App.jsx` and flows down to components as props; components report user actions back up through callback props (`onEdit`, `onDelete`, `onAddToCart`, etc.). Business logic (validation, tax math, inventory status, filtering) is factored out of components entirely and lives in `utils/`, so it's reusable and easy to test in isolation from the UI.
+Requests flow in one direction through the layers:
+
+```
+Browser -> Controller -> Service -> Repository -> PostgreSQL
+```
+
+Each layer has one job. Controllers translate HTTP to method calls and back, holding no logic. Services own the business rules and define where transactions start and end. Repositories are the only code that touches the database. Entities describe the tables. Domain exceptions are thrown by services and converted to status codes by a `@RestControllerAdvice`, so no service class needs to know HTTP exists.
+
+DTOs sit between the API and the entities so the database schema is not exposed directly to clients, and so an order response can flatten product names into line items without triggering lazy loading during serialization.
+
+### API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/products` | List all products |
+| POST | `/api/products` | Create a product |
+| PUT | `/api/products/{id}` | Update a product |
+| DELETE | `/api/products/{id}` | Delete a product |
+| GET | `/api/orders` | List orders, newest first |
+| GET | `/api/orders/{id}` | Fetch a single order |
+| POST | `/api/orders` | Place an order |
+
+Error responses carry a JSON body with `status`, `message`, and `timestamp`. Ordering more than is available returns 400, an unknown id returns 404, and losing a concurrency race returns 409.
 
 ## Running Locally
 
+**Prerequisites:** JDK 17+, PostgreSQL 14+, Node.js 18+.
+
+**1. Create the databases.** In pgAdmin or `psql`, create `storeflow` and `storeflow_test`.
+
+**2. Set your database password** as an environment variable so it is never committed:
+
+```powershell
+[Environment]::SetEnvironmentVariable("DB_PASSWORD", "your-postgres-password", "User")
+```
+
+**3. Start the backend** (first run downloads dependencies):
+
 ```bash
-git clone https://github.com/<your-username>/storeflow.git
-cd storeflow
+cd backend
+./mvnw spring-boot:run
+```
+
+The API starts on `http://localhost:8080`. Hibernate creates the schema and seeds ten demo products on first run.
+
+**4. Start the frontend** in a second terminal:
+
+```bash
+cd frontend
 npm install
 npm run dev
 ```
 
-Then open `http://localhost:5173/` in your browser.
+Open `http://localhost:5173`.
+
+**Run the test suite:**
+
+```bash
+cd backend
+./mvnw test
+```
 
 ## Key Business Logic
 
-**Inventory status** is derived, not stored: a product's status is always computed from its current stock count, so it can never drift out of sync:
+### Order placement is one transaction
 
-```js
-function getInventoryStatus(stock) {
-  if (stock === 0) return "Out of Stock";
-  if (stock <= 10) return "Low Stock";
-  return "In Stock";
+`OrderService.placeOrder` validates each line against current stock, decrements it, and saves the order inside a single `@Transactional` method. If any line fails, the exception rolls back every change made so far. A multi-item order where the last line is impossible leaves the earlier products untouched, which is covered by a test.
+
+```java
+@Transactional
+public Order placeOrder(CreateOrderRequest request) {
+    for (OrderItemRequest line : request.items()) {
+        Product product = productRepository.findById(line.productId())
+                .orElseThrow(() -> new ProductNotFoundException(line.productId()));
+
+        if (line.quantity() > product.getStockQuantity()) {
+            throw new InsufficientStockException(product.getName(), product.getStockQuantity());
+        }
+
+        product.setStockQuantity(product.getStockQuantity() - line.quantity());
+        ...
+    }
 }
 ```
 
-**Order validation** is centralized in one reusable function, called both when adding an item to the cart and again defensively at checkout (in case stock changed in the meantime):
+### Optimistic locking prevents overselling
 
-```js
-function validateOrderQuantity(product, requestedQuantity) {
-  if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
-    return "Quantity must be at least 1.";
-  }
-  if (requestedQuantity > product.stock) {
-    return `Only ${product.stock} units are available.`;
-  }
-  return null;
-}
+`@Transactional` gives atomicity but not isolation from stale reads. Under PostgreSQL's default READ_COMMITTED isolation, two transactions can both read `stock = 1`, both pass the stock check, and both commit, selling the same unit twice.
+
+A `@Version` column closes that gap. Hibernate includes the version it read in the update:
+
+```sql
+UPDATE products SET stock_quantity = 0, version = 8
+WHERE id = 4 AND version = 7
 ```
 
-**Order totals** use Ontario HST (13%) via small, composable functions rather than one large inline calculation:
+The first transaction to commit moves the row to version 8. The second matches zero rows, Hibernate raises `ObjectOptimisticLockingFailureException`, and the transaction rolls back. The API returns 409 Conflict, signalling a valid request that lost a race and may be retried.
 
-```js
-calculateSubtotal(cartItems) → sum of price × quantity
-calculateTax(subtotal)       → subtotal × 0.13
-calculateTotal(subtotal, tax) → subtotal + tax
-```
+### Money is never floating point
 
-**Placing an order** performs three things atomically from the user's perspective: it re-validates every cart line against current stock, subtracts purchased quantities from the product list, and records the order, so the dashboard's inventory, order count, and revenue are always consistent with each other.
+Prices, tax, and totals use `BigDecimal` with explicit `HALF_UP` rounding to two decimals. Binary floating point cannot represent values like 0.1 exactly, which produces cent-level drift that compounds across a catalog.
+
+### The client is not trusted
+
+Order requests contain only product ids and quantities. The server looks up prices itself, so tampering with the request cannot change what an order costs. Client-side validation still exists for immediate feedback, but the server re-validates everything independently.
+
+## Testing
+
+Seven tests run against a dedicated `storeflow_test` database, so they never touch development data.
+
+| Test | What it proves |
+|---|---|
+| `rejectsAnOrderForMoreUnitsThanAreInStock` | Oversell is refused and stock is untouched |
+| `appliesOntarioHstAcrossAMultiItemOrder` | 13 percent HST is correct across multiple line items |
+| `decrementsStockForEveryLineInTheOrder` | Every line reduces its product's stock |
+| `rollsBackEarlierLinesWhenALaterLineFails` | A failed line undoes earlier decrements |
+| `aWriteCarryingAStaleVersionIsRejected` | The version column rejects stale writes, deterministically |
+| `onlyOneOfTwoConcurrentOrdersForTheLastUnitSucceeds` | Two real threads race for one unit and exactly one wins |
+| `contextLoads` | The Spring context and database wiring start correctly |
+
+The concurrency test reports which guard rejected the loser, so it is clear whether optimistic locking or the stock check caught the race on a given run.
 
 ## Screenshots
 
@@ -141,21 +216,27 @@ calculateTotal(subtotal, tax) → subtotal + tax
 **Orders**
 ![StoreFlow orders view with order history](./screenshots/orders.png)
 
+## Project History
+
+The browser-only version is tagged [`v1.0.0`](https://github.com/rayhansadiq/storeflow/releases/tag/v1.0.0), a React single-page app with `localStorage` persistence and client-side business logic. The current version replaces that with a Java backend and PostgreSQL while keeping the same interface.
+
 ## Future Improvements
 
-- Persist data to a real backend and database instead of `localStorage`
-- User authentication for multi-user / multi-store support
-- Pagination or virtualization for large product catalogs
-- CSV import/export for bulk product management
-- Automated tests (unit tests for `utils/`, component tests for forms and validation)
-- Configurable tax rates for other provinces/regions
-- Dark mode
+- Flyway migrations instead of `ddl-auto`, so schema changes are versioned and reviewable
+- Authentication and per-merchant data isolation
+- Pagination for large catalogs
+- Retry handling on 409 responses so a losing order can be resubmitted automatically
+- Integration tests with Testcontainers, removing the local PostgreSQL requirement
+- Deployment with the API and database hosted rather than run locally
 
 ## What I Learned
 
-Building StoreFlow was my first real project in React after learning it specifically for this. A few things that stood out:
+This started as a React project and became my introduction to Java and Spring Boot.
 
-- **Deriving state instead of storing it** avoids entire classes of bugs: inventory status and filtered product lists are computed on every render from a single source of truth (`products`), rather than kept in sync manually.
-- **Separating business logic from components** (validation, tax math, filtering) made the code far easier to reason about and meant the same functions could be reused in multiple places without duplication.
-- **Designing reusable components** like `Modal` and `ProductTable`, using props to control both display and behavior (e.g. `ProductTable` renders differently depending on whether `onEdit`/`onDelete` are passed), clarified how composition works in React in a way tutorials hadn't.
-- **Defensive validation matters more than it seems at first**: re-checking stock at the moment an order is placed, not just when it's added to the cart, closes a real gap that would otherwise let stale UI state cause an invalid order.
+**Where a rule lives determines whether it is a rule.** Oversell prevention existed in v1, but as browser JavaScript it was a suggestion. Moving it behind an API made it enforceable, and that distinction between client-side validation for user experience and server-side validation for correctness is the single most useful thing I took from this.
+
+**Atomicity and isolation are different guarantees.** I assumed `@Transactional` made concurrent orders safe. It does not. It guarantees all-or-nothing, but two transactions can still read the same stale value and both pass their checks. Understanding why required actually writing the race, watching it happen, and seeing the version column reject the loser.
+
+**Layering pays off when requirements change.** Because validation and tax logic lived in a service rather than in controllers, testing it meant calling a method rather than standing up HTTP requests, and the exception-to-status-code translation stayed in one place.
+
+**ORMs generate SQL you should look at.** Turning on `show-sql` made the framework legible instead of magical. It also caught a real bug: `findAll()` has no `ORDER BY`, and PostgreSQL relocates updated rows, so the product list reshuffled after every order until I added explicit ordering.
