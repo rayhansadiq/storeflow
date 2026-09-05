@@ -1,6 +1,6 @@
 import { calculateSubtotal, calculateTax, calculateTotal, formatCurrency } from "../utils/calculations";
 
-function OrderSummary({ cart, onPlaceOrder }) {
+function OrderSummary({ cart, onPlaceOrder, isPlacing = false }) {
   const subtotal = calculateSubtotal(cart);
   const tax = calculateTax(subtotal);
   const total = calculateTotal(subtotal, tax);
@@ -23,9 +23,9 @@ function OrderSummary({ cart, onPlaceOrder }) {
         type="button"
         className="btn-primary place-order-btn"
         onClick={onPlaceOrder}
-        disabled={cart.length === 0}
+        disabled={cart.length === 0 || isPlacing}
       >
-        Place Order
+        {isPlacing ? "Placing order..." : "Place Order"}
       </button>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Sidebar from "./components/Sidebar";
 import DashboardStats from "./components/DashboardStats";
 import ProductTable from "./components/ProductTable";
@@ -8,26 +8,26 @@ import ProductForm from "./components/ProductForm";
 import OrderBuilder from "./components/OrderBuilder";
 import OrderSummary from "./components/OrderSummary";
 import OrderHistory from "./components/OrderHistory";
-import { starterProducts } from "./data/starterProducts";
 import { filterProducts } from "./utils/inventory";
-import { calculateSubtotal, calculateTax, calculateTotal } from "./utils/calculations";
-import { loadProducts, saveProducts, loadOrders, saveOrders } from "./utils/storage";
+import {
+  fetchProducts,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+} from "./api/products";
+import { fetchOrders, placeOrder } from "./api/orders";
 import "./App.css";
 
 const STATUS_FILTERS = ["All", "In Stock", "Low Stock", "Out of Stock"];
 
-function getNextProductId(products) {
-  return products.length ? Math.max(...products.map((p) => p.id)) + 1 : 1;
-}
-
-function getNextOrderId(orders) {
-  return orders.length ? Math.max(...orders.map((o) => o.id)) + 1 : 1;
-}
-
 function App() {
   const [activeView, setActiveView] = useState("Dashboard");
-  const [products, setProducts] = useState(() => loadProducts(starterProducts));
-  const [orders, setOrders] = useState(() => loadOrders());
+  const [products, setProducts] = useState([]);
+  const [orders, setOrders] = useState([]);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
@@ -38,14 +38,31 @@ function App() {
 
   const [cart, setCart] = useState([]);
   const [orderError, setOrderError] = useState("");
+  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+
+  const refreshFromApi = useCallback(async () => {
+    setLoadError("");
+    try {
+      const [latestProducts, latestOrders] = await Promise.all([
+        fetchProducts(),
+        fetchOrders(),
+      ]);
+      setProducts(latestProducts);
+      setOrders(latestOrders);
+    } catch (error) {
+      setLoadError(
+        `Could not reach the StoreFlow API. Make sure the backend is running on port 8080. (${error.message})`
+      );
+    }
+  }, []);
 
   useEffect(() => {
-    saveProducts(products);
-  }, [products]);
-
-  useEffect(() => {
-    saveOrders(orders);
-  }, [orders]);
+    (async () => {
+      setIsLoading(true);
+      await refreshFromApi();
+      setIsLoading(false);
+    })();
+  }, [refreshFromApi]);
 
   const categories = Array.from(new Set(products.map((p) => p.category))).sort();
 
@@ -72,21 +89,30 @@ function App() {
     setEditingProduct(null);
   }
 
-  function handleFormSubmit(formValues) {
-    if (editingProduct) {
-      setProducts((prev) =>
-        prev.map((p) => (p.id === editingProduct.id ? { ...p, ...formValues } : p))
-      );
-    } else {
-      const newProduct = { id: getNextProductId(products), ...formValues };
-      setProducts((prev) => [...prev, newProduct]);
+  async function handleFormSubmit(formValues) {
+    setActionError("");
+    try {
+      if (editingProduct) {
+        await updateProduct(editingProduct.id, formValues);
+      } else {
+        await createProduct(formValues);
+      }
+      handleCloseModal();
+      await refreshFromApi();
+    } catch (error) {
+      setActionError(`Could not save the product: ${error.message}`);
     }
-    handleCloseModal();
   }
 
-  function handleDeleteProduct(id) {
-    setProducts((prev) => prev.filter((p) => p.id !== id));
-    setCart((prev) => prev.filter((item) => item.productId !== id));
+  async function handleDeleteProduct(id) {
+    setActionError("");
+    try {
+      await deleteProduct(id);
+      setCart((prev) => prev.filter((item) => item.productId !== id));
+      await refreshFromApi();
+    } catch (error) {
+      setActionError(`Could not delete the product: ${error.message}`);
+    }
   }
 
   function handleAddToCart(product, quantity) {
@@ -108,59 +134,42 @@ function App() {
     setCart((prev) => prev.filter((item) => item.productId !== productId));
   }
 
-  function handlePlaceOrder() {
+  /**
+   * The server owns validation, pricing, tax and the stock decrement. This only
+   * sends the cart and reports back whatever the server decided.
+   */
+  async function handlePlaceOrder() {
     if (cart.length === 0) return;
 
-    for (const item of cart) {
-      const product = products.find((p) => p.id === item.productId);
-      if (!product) {
-        setOrderError(`${item.name} is no longer available.`);
-        return;
-      }
-      if (item.quantity > product.stock) {
-        setOrderError(`Only ${product.stock} units of ${product.name} are available.`);
-        return;
-      }
-    }
-
-    const subtotal = calculateSubtotal(cart);
-    const tax = calculateTax(subtotal);
-    const total = calculateTotal(subtotal, tax);
-
-    const newOrder = {
-      id: getNextOrderId(orders),
-      date: new Date().toISOString(),
-      items: cart,
-      subtotal,
-      tax,
-      total,
-    };
-
-    setProducts((prev) =>
-      prev.map((p) => {
-        const cartItem = cart.find((item) => item.productId === p.id);
-        return cartItem ? { ...p, stock: p.stock - cartItem.quantity } : p;
-      })
-    );
-
-    setOrders((prev) => [newOrder, ...prev]);
-    setCart([]);
+    setIsPlacingOrder(true);
     setOrderError("");
+
+    try {
+      await placeOrder(cart);
+      setCart([]);
+      await refreshFromApi();
+    } catch (error) {
+      setOrderError(error.message);
+      // Stock may have moved underneath us, so pull fresh numbers either way.
+      await refreshFromApi();
+    } finally {
+      setIsPlacingOrder(false);
+    }
   }
 
-  function handleResetDemoData() {
+  async function handleResetDemoData() {
     const confirmed = window.confirm(
-      "This will erase all products, orders, and revenue data and restore the original demo data. Continue?"
+      "This will clear your cart and reload products and orders from the server. Continue?"
     );
     if (!confirmed) return;
 
-    setProducts(starterProducts);
-    setOrders([]);
     setCart([]);
     setOrderError("");
+    setActionError("");
     setSearchQuery("");
     setStatusFilter("All");
     setCategoryFilter("All");
+    await refreshFromApi();
   }
 
   return (
@@ -172,7 +181,21 @@ function App() {
           <p className="header-subtitle">Inventory and order management overview</p>
         </header>
 
-        {activeView === "Dashboard" && (
+        {loadError && (
+          <p className="banner banner-error" role="alert">
+            {loadError}
+          </p>
+        )}
+
+        {actionError && (
+          <p className="banner banner-error" role="alert">
+            {actionError}
+          </p>
+        )}
+
+        {isLoading && <p className="banner banner-info">Loading StoreFlow data...</p>}
+
+        {!isLoading && activeView === "Dashboard" && (
           <>
             <DashboardStats products={products} orderCount={orders.length} revenue={revenue} />
             <section className="section">
@@ -182,7 +205,7 @@ function App() {
           </>
         )}
 
-        {activeView === "Products" && (
+        {!isLoading && activeView === "Products" && (
           <section className="section">
             <div className="products-toolbar">
               <SearchBar value={searchQuery} onChange={setSearchQuery} />
@@ -233,7 +256,7 @@ function App() {
           </section>
         )}
 
-        {activeView === "Orders" && (
+        {!isLoading && activeView === "Orders" && (
           <>
             <section className="section">
               <h2>Build an Order</h2>
@@ -247,7 +270,11 @@ function App() {
 
             <section className="section">
               <h2>Order Summary</h2>
-              <OrderSummary cart={cart} onPlaceOrder={handlePlaceOrder} />
+              <OrderSummary
+                cart={cart}
+                onPlaceOrder={handlePlaceOrder}
+                isPlacing={isPlacingOrder}
+              />
               {orderError && (
                 <p className="field-error order-error" role="alert">
                   {orderError}
